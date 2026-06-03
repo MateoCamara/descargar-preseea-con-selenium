@@ -1,3 +1,10 @@
+"""Download the PRESEEA corpus (preseea.uah.es) with a Selenium-driven Chrome bot.
+
+The bot opens the corpus search, runs a broad query, walks the paginated results table
+and downloads the transcription/audio files of every entry into a local ``downloads/``
+folder (using ``requests`` together with the browser's session cookies). Run it with
+``python download.py``.
+"""
 import os
 import time
 import requests
@@ -38,17 +45,17 @@ def download_file(url, session_cookies):
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-        
+
         # Use requests to download
-        r = requests.get(url, cookies=session_cookies, headers=headers, stream=True)
-        
+        r = requests.get(url, cookies=session_cookies, headers=headers, stream=True, timeout=30)
+
         # Try to get filename from header
         local_filename = get_filename_from_cd(r.headers.get('content-disposition'))
         if not local_filename:
             local_filename = url.split('/')[-1]
             if "?" in local_filename:
                 local_filename = local_filename.split("?")[0]
-        
+
         # Clean filename
         local_filename = os.path.basename(local_filename)
         path = os.path.join(DOWNLOAD_DIR, local_filename)
@@ -60,14 +67,13 @@ def download_file(url, session_cookies):
 
         print(f"Downloading {local_filename}...")
         with open(path, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=8192): 
+            for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
         return True
     except Exception as e:
         print(f"Error downloading {url}: {e}")
         return False
 
-# ... (imports remain the same)
 
 def main():
     # Setup Chrome Options for "stealth"
@@ -81,22 +87,19 @@ def main():
 
     # Initialize WebDriver
     driver = webdriver.Chrome(options=chrome_options)
-    
+
     # Anti-detection script
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
     try:
         print(f"Navigating to {BASE_URL}")
         driver.get(BASE_URL)
-        
+
         wait = WebDriverWait(driver, 15)
 
-        # IMPORTANT: The content is inside an IFRAME.
-        # We must switch to the iframe to access the elements.
+        # The corpus search UI is rendered inside an iframe, so switch into it
+        # (selected by tag name, as it is the prominent frame on the page).
         print("Waiting for iframe...")
-        # There seems to be an iframe. Let's find it.
-        # Based on subagent investigation, the search is in an iframe.
-        # We can switch to it by tag name if it's the only one or prominent
         try:
            iframe = wait.until(EC.presence_of_element_located((By.TAG_NAME, "iframe")))
            print("Switching to iframe...")
@@ -107,14 +110,12 @@ def main():
         # Wait for search box
         print("Waiting for search input...")
         search_input = wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="busca2"]')))
-        
+
         print("Entering search term...")
         search_input.clear()
         search_input.send_keys("a")
 
-        # Find and click search button
-        # The user said //*[@id="sencillas"]/fieldset/input[3]
-        # We verified it exists in the iframe.
+        # Find and click the search button (inside the iframe).
         search_button = driver.find_element(By.XPATH, '//*[@id="sencillas"]/fieldset/input[3]')
         search_button.click()
 
@@ -125,39 +126,32 @@ def main():
             # Wait for table to load/reload
             # The table logic: //*[@id="superResultados"]/div/table/tbody
             wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="superResultados"]/div/table/tbody/tr')))
-            
+
             # Additional small wait to ensure table is fully rendered
             time.sleep(2)
 
             # Get all rows
             rows = driver.find_elements(By.XPATH, '//*[@id="superResultados"]/div/table/tbody/tr')
-            
+
             # Create a session from selenium cookies for downloading
             session_cookies = {cookie['name']: cookie['value'] for cookie in driver.get_cookies()}
-            
+
             row_count_in_page = len(rows)
             print(f"Found {row_count_in_page} rows on this page.")
 
-            # Skip the first row if it is a header (usually it is). 
-            # The user said to access tr[2], which implies tr[1] is header.
-            # We will iterate from index 1 (second row) if multiple rows exist.
+            # Skip the first row when there is more than one: it is the table header.
             start_index = 1 if row_count_in_page > 1 else 0
-            
-            # Check if strictly following user instructions (tr[2] start)
-            # We will just try to find links in ALL rows to be safe, starting from 1
-            
+
             links_found_on_page = 0
-            
+
             for i in range(start_index, row_count_in_page):
                 row = rows[i]
                 try:
-                    # Attempt to find the specific links relative to the row
-                    # User: .//td[5]/a[1] (Transcription) and .//td[5]/a[2] (Audio)
-                    
+                    # Column 5 holds up to two links per row: a[1] = transcription, a[2] = audio.
                     try:
                         link1 = row.find_element(By.XPATH, './/td[5]/a[1]')
                         url1 = link1.get_attribute('href')
-                        
+
                         if url1 and url1 not in processed_links:
                             if download_file(url1, session_cookies):
                                 processed_links.add(url1)
@@ -168,7 +162,7 @@ def main():
                     try:
                         link2 = row.find_element(By.XPATH, './/td[5]/a[2]')
                         url2 = link2.get_attribute('href')
-                        
+
                         if url2 and url2 not in processed_links:
                             if download_file(url2, session_cookies):
                                 processed_links.add(url2)
@@ -179,7 +173,7 @@ def main():
                 except Exception as e:
                     print(f"Error processing row {i}: {e}")
                     continue
-            
+
             print(f"Processed {links_found_on_page} links on this page.")
 
             # Check for "NEXT" button
@@ -188,19 +182,19 @@ def main():
             try:
                 # Re-fetch elements to avoid staleness
                 next_buttons = driver.find_elements(By.XPATH, '//*[@id="superResultados"]/fieldset/a')
-                
+
                 next_btn = None
                 for btn in next_buttons:
                     text = btn.text.lower()
                     if "siguientes" in text or ">" in text:
                         next_btn = btn
                         break
-                
+
                 if next_btn:
                     print("Clicking 'Siguientes'...")
                     driver.execute_script("arguments[0].click();", next_btn)
-                    
-                    # We need to wait for the table to change. 
+
+                    # We need to wait for the table to change.
                     # Simple wait is usually okay for this kind of site.
                     time.sleep(3)
                 else:
